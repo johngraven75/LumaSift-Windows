@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   ALL_SELECTION_TYPES,
   Candidate,
+  CompanionAccess,
   NasConnectRequest,
   ResolutionPlan,
   ScanProgress,
@@ -45,6 +46,7 @@ export function LumaSiftApp(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [purgeText, setPurgeText] = useState("");
+  const [companion, setCompanion] = useState<CompanionAccess | null>(null);
   const [nas, setNas] = useState<NasConnectRequest>({
     uncPath: "",
     username: "",
@@ -56,6 +58,10 @@ export function LumaSiftApp(): JSX.Element {
     () => `${Math.max(0, Math.min(100, progress.percentage))}% · ${progress.phase}`,
     [progress.percentage, progress.phase]
   );
+
+  useEffect(() => {
+    void invoke<CompanionAccess>("get_companion_access").then(setCompanion).catch((reason) => setError(String(reason)));
+  }, []);
 
   useEffect(() => {
     if (!progress.scanning) return;
@@ -196,6 +202,8 @@ export function LumaSiftApp(): JSX.Element {
           <div className="quarantine-actions"><p>Applying this plan re-checks every selected candidate’s SHA-256 hash immediately before moving it. Retained files are never moved.</p><button className="primary" disabled={busy || plan.status !== "ready_for_review"} onClick={() => void applyPlan()}>Approve quarantine plan</button></div>
         </> : <p className="empty">A completed scan will show exact groups, rank evidence, and every planned disposition here.</p>}
       </section>
+
+      {companion && <section className="companion-section"><div><p className="eyebrow">Mobile companion setup</p><h3>Configure Android & iOS through HTTPS</h3><p>Local coordinator: <code>{companion.localUrl}</code><br />Access token: <code>{companion.accessToken}</code><br />{companion.tlsNotice}</p></div></section>}
 
       <section className="purge-section"><div><p className="eyebrow">Separate irreversible action</p><h3>Purge only after recovery review</h3><p>Enter <code>ERASE LUMASIFT QUARANTINE</code> to permanently erase the LumaSift quarantine. This cannot be undone.</p></div><div className="purge-controls"><input value={purgeText} onChange={(event) => setPurgeText(event.target.value)} placeholder="Type confirmation" /><button className="danger" disabled={busy || purgeText !== "ERASE LUMASIFT QUARANTINE"} onClick={() => void purgeQuarantine()}>Permanently erase</button></div></section>
     </main>

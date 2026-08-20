@@ -12,6 +12,12 @@ export interface NasConnectRequest {
   rememberConnection: boolean;
 }
 
+export interface CompanionAccess {
+  localUrl: string;
+  accessToken: string;
+  tlsNotice: string;
+}
+
 export interface ScanProgress {
   scanning: boolean;
   phase: string;

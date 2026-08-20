@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use tauri::{AppHandle, Manager};
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -16,6 +17,7 @@ const SAMPLE_BYTES: usize = 1_048_576;
 const PURGE_CONFIRMATION: &str = "ERASE LUMASIFT QUARANTINE";
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
+static OWNER_SOURCE_SCOPE: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -152,6 +154,10 @@ fn runtime() -> &'static Mutex<Runtime> {
 
 fn state() -> std::sync::MutexGuard<'static, Runtime> {
     runtime().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn owner_source_scope() -> &'static Mutex<Vec<String>> {
+    OWNER_SOURCE_SCOPE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn display_name(path: &Path) -> String {
@@ -493,13 +499,7 @@ fn start_resolution(app: AppHandle, request: ScanRequest) -> Result<ScanProgress
     validate_request(&request)?;
     if state().progress.scanning { return Err("A LumaSift scan is already in progress.".to_string()); }
     let app_data = app.path().app_data_dir().map_err(|error| format!("Unable to access LumaSift app data: {error}"))?;
-    let files = source_files(&request, &app_data)?;
-    CANCEL_REQUESTED.store(false, Ordering::Relaxed);
-    let initial = ScanProgress { scanning: true, phase: "Preparing".to_string(), current: 0, total: files.len() as u64, percentage: 0, current_path: None, files_considered: files.len() as u64, message: "Preparing a review-only exact-content duplicate scan. No files will be changed.".to_string(), error: None };
-    { let mut runtime = state(); runtime.progress = initial.clone(); runtime.plan = None; }
-    let selected_types = request.selected_types;
-    thread::Builder::new().name("lumasift-resolution".to_string()).spawn(move || build_plan(files, selected_types, app_data)).map_err(|error| format!("Unable to start LumaSift worker: {error}"))?;
-    Ok(initial)
+    start_with_app_data(app_data, request)
 }
 
 #[tauri::command]
@@ -517,35 +517,7 @@ fn connect_nas_source(request: NasConnectRequest) -> Result<(), String> {
 
 #[tauri::command]
 fn apply_resolution_plan(app: AppHandle, plan_id: String) -> Result<serde_json::Value, String> {
-    let root = quarantine_root(&app)?;
-    let mut plan = state().plan.clone().ok_or("No LumaSift plan is ready for review.")?;
-    if plan.id != plan_id || plan.status != "ready_for_review" { return Err("This LumaSift plan is stale or no longer eligible for application.".to_string()); }
-    let directory = root.join(&plan.id);
-    fs::create_dir_all(&directory).map_err(|error| format!("Unable to create quarantine: {error}"))?;
-    let mut quarantined = 0_u64;
-    let mut failed = 0_u64;
-    for group in &mut plan.groups {
-        for candidate in &mut group.candidates {
-            if candidate.disposition != "queued_for_quarantine" { continue; }
-            let source = PathBuf::from(&candidate.file_path);
-            let result = (|| -> Result<PathBuf, String> {
-                if full_hash(&source)? != candidate.exact_hash { return Err("Content changed since review; the file was left in place.".to_string()); }
-                let destination = unique_destination(&directory, &source)?;
-                move_without_overwrite(&source, &destination)?;
-                Ok(destination)
-            })();
-            match result {
-                Ok(destination) => { candidate.disposition = "quarantined".to_string(); candidate.disposition_detail = "Moved to LumaSift quarantine. It has not been permanently deleted.".to_string(); candidate.quarantine_path = Some(destination.to_string_lossy().into_owned()); append_disposition(&mut plan.dispositions, &source, "quarantined", candidate.disposition_detail.clone()); quarantined += 1; }
-                Err(error) => { candidate.disposition = "failed".to_string(); candidate.disposition_detail = error.clone(); append_disposition(&mut plan.dispositions, &source, "failed", error); failed += 1; }
-            }
-        }
-    }
-    plan.status = if failed == 0 { "applied_to_quarantine".to_string() } else { "partially_applied".to_string() };
-    plan.queued_file_count = plan.groups.iter().flat_map(|group| group.candidates.iter()).filter(|candidate| candidate.disposition == "queued_for_quarantine").count() as u64;
-    let mut runtime = state();
-    runtime.progress.message = format!("LumaSift quarantined {quarantined} file(s); {failed} file(s) remained in place.");
-    runtime.plan = Some(plan.clone());
-    Ok(serde_json::json!({ "status": plan.status, "quarantined": quarantined, "failed": failed, "message": "Quarantine completed. Permanent erase remains a separate explicit action." }))
+    apply_with_root(quarantine_root(&app)?, plan_id)
 }
 
 #[tauri::command]
@@ -563,10 +535,122 @@ fn purge_quarantine(app: AppHandle, confirmation: String) -> Result<serde_json::
     Ok(serde_json::json!({ "status": "erased", "erased": erased, "message": "LumaSift quarantine was permanently erased after explicit confirmation." }))
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanionAccess {
+    local_url: String,
+    access_token: String,
+    tls_notice: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompanionStartRequest {
+    selected_types: Vec<SelectionType>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompanionApplyRequest {
+    plan_id: String,
+}
+
+static COMPANION_ACCESS: OnceLock<CompanionAccess> = OnceLock::new();
+
+fn companion_access() -> Result<CompanionAccess, String> {
+    COMPANION_ACCESS.get().cloned().ok_or_else(|| "LumaSift companion service is not configured.".to_string())
+}
+
+fn companion_token(app_data: &Path) -> Result<String, String> {
+    let directory = app_data.join("lumasift");
+    fs::create_dir_all(&directory).map_err(|error| format!("Unable to create companion storage: {error}"))?;
+    let path = directory.join("companion-access-token.txt");
+    if let Ok(token) = fs::read_to_string(&path) {
+        let token = token.trim().to_string();
+        if !token.is_empty() { return Ok(token); }
+    }
+    let token = Uuid::new_v4().to_string();
+    fs::write(&path, &token).map_err(|error| format!("Unable to persist companion access token: {error}"))?;
+    Ok(token)
+}
+
+fn snake_case_key(key: &str) -> String {
+    key.chars().enumerate().fold(String::new(), |mut output, (index, character)| {
+        if character.is_ascii_uppercase() { if index > 0 { output.push('_'); } output.push(character.to_ascii_lowercase()); } else { output.push(character); }
+        output
+    })
+}
+
+fn redact_companion_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(map.into_iter().filter_map(|(key, value)| {
+            if matches!(key.as_str(), "filePath" | "quarantinePath" | "currentPath") { None } else { Some((snake_case_key(&key), redact_companion_value(value))) }
+        }).collect()),
+        serde_json::Value::Array(items) => serde_json::Value::Array(items.into_iter().map(redact_companion_value).collect()),
+        other => other,
+    }
+}
+
+fn companion_json(status: u16, value: serde_json::Value) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = serde_json::to_vec(&redact_companion_value(value)).unwrap_or_else(|_| b"{\"error\":\"serialization_failed\"}".to_vec());
+    Response::from_data(body).with_status_code(StatusCode(status)).with_header(Header::from_bytes("Content-Type", "application/json").expect("static header is valid"))
+}
+
+fn start_with_app_data(app_data: PathBuf, request: ScanRequest) -> Result<ScanProgress, String> {
+    validate_request(&request)?;
+    *owner_source_scope().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = request.sources.clone();
+    if state().progress.scanning { return Err("A LumaSift scan is already in progress.".to_string()); }
+    let files = source_files(&request, &app_data)?;
+    CANCEL_REQUESTED.store(false, Ordering::Relaxed);
+    let initial = ScanProgress { scanning: true, phase: "Preparing".to_string(), current: 0, total: files.len() as u64, percentage: 0, current_path: None, files_considered: files.len() as u64, message: "Preparing a review-only exact-content duplicate scan. No files will be changed.".to_string(), error: None };
+    { let mut runtime = state(); runtime.progress = initial.clone(); runtime.plan = None; }
+    thread::Builder::new().name("lumasift-resolution".to_string()).spawn(move || build_plan(files, request.selected_types, app_data)).map_err(|error| format!("Unable to start LumaSift worker: {error}"))?;
+    Ok(initial)
+}
+
+fn apply_with_root(root: PathBuf, plan_id: String) -> Result<serde_json::Value, String> {
+    let mut plan = state().plan.clone().ok_or("No LumaSift plan is ready for review.")?;
+    if plan.id != plan_id || plan.status != "ready_for_review" { return Err("This LumaSift plan is stale or no longer eligible for application.".to_string()); }
+    let directory = root.join(&plan.id);
+    fs::create_dir_all(&directory).map_err(|error| format!("Unable to create quarantine: {error}"))?;
+    let mut quarantined = 0_u64; let mut failed = 0_u64;
+    for group in &mut plan.groups { for candidate in &mut group.candidates {
+        if candidate.disposition != "queued_for_quarantine" { continue; }
+        let source = PathBuf::from(&candidate.file_path);
+        let result = (|| -> Result<PathBuf, String> { if full_hash(&source)? != candidate.exact_hash { return Err("Content changed since review; the file was left in place.".to_string()); } let destination = unique_destination(&directory, &source)?; move_without_overwrite(&source, &destination)?; Ok(destination) })();
+        match result { Ok(destination) => { candidate.disposition = "quarantined".to_string(); candidate.disposition_detail = "Moved to LumaSift quarantine. It has not been permanently deleted.".to_string(); candidate.quarantine_path = Some(destination.to_string_lossy().into_owned()); append_disposition(&mut plan.dispositions, &source, "quarantined", candidate.disposition_detail.clone()); quarantined += 1; }, Err(error) => { candidate.disposition = "failed".to_string(); candidate.disposition_detail = error.clone(); append_disposition(&mut plan.dispositions, &source, "failed", error); failed += 1; } }
+    }}
+    plan.status = if failed == 0 { "applied_to_quarantine".to_string() } else { "partially_applied".to_string() };
+    plan.queued_file_count = plan.groups.iter().flat_map(|group| group.candidates.iter()).filter(|candidate| candidate.disposition == "queued_for_quarantine").count() as u64;
+    let mut runtime = state(); runtime.progress.message = format!("LumaSift quarantined {quarantined} file(s); {failed} file(s) remained in place."); runtime.plan = Some(plan.clone());
+    Ok(serde_json::json!({ "status": plan.status, "plan": plan }))
+}
+
+fn serve_companion(app_data: PathBuf, access: CompanionAccess) {
+    let Ok(server) = Server::http("127.0.0.1:7417") else { return; };
+    for mut request in server.incoming_requests() {
+        let authorized = request.headers().iter().any(|header| header.field.equiv("Authorization") && header.value.as_str() == format!("Bearer {}", access.access_token));
+        if !authorized { let _ = request.respond(companion_json(401, serde_json::json!({"error":"unauthorized"}))); continue; }
+        let path = request.url().to_string();
+        let response = match (request.method(), path.as_str()) {
+            (&Method::Get, "/api/lumasift/status") => companion_json(200, serde_json::to_value(get_scan_progress()).unwrap_or_default()),
+            (&Method::Get, "/api/lumasift/plan") => match get_resolution_plan() { Some(plan) => companion_json(200, serde_json::to_value(plan).unwrap_or_default()), None => companion_json(404, serde_json::json!({"error":"no_plan"})) },
+            (&Method::Post, "/api/lumasift/start") => { let mut body = String::new(); let _ = request.as_reader().read_to_string(&mut body); match serde_json::from_str::<CompanionStartRequest>(&body).map_err(|error| error.to_string()).and_then(|payload| start_with_app_data(app_data.clone(), ScanRequest { sources: configured_sources(), selected_types: payload.selected_types })) { Ok(progress) => companion_json(200, serde_json::to_value(progress).unwrap_or_default()), Err(error) => companion_json(400, serde_json::json!({"error":error})) } },
+            (&Method::Post, "/api/lumasift/plan/apply") => { let mut body = String::new(); let _ = request.as_reader().read_to_string(&mut body); match serde_json::from_str::<CompanionApplyRequest>(&body).map_err(|error| error.to_string()).and_then(|payload| apply_with_root(app_data.join("lumasift").join("quarantine"), payload.plan_id)) { Ok(result) => companion_json(200, result.get("plan").cloned().unwrap_or(result)), Err(error) => companion_json(400, serde_json::json!({"error":error})) } },
+            _ => companion_json(404, serde_json::json!({"error":"not_found"})),
+        };
+        let _ = request.respond(response);
+    }
+}
+
+fn configured_sources() -> Vec<String> { owner_source_scope().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone() }
+
+#[tauri::command]
+fn get_companion_access() -> Result<CompanionAccess, String> { companion_access() }
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![get_scan_progress, get_resolution_plan, start_resolution, cancel_resolution, connect_nas_source, apply_resolution_plan, purge_quarantine])
+        .setup(|app| { let app_data = app.path().app_data_dir()?; let token = companion_token(&app_data).map_err(std::io::Error::other)?; let access = CompanionAccess { local_url: "http://127.0.0.1:7417".to_string(), access_token: token, tls_notice: "Expose this local service to mobile companions only through an owner-managed HTTPS reverse proxy on the same Windows host.".to_string() }; let _ = COMPANION_ACCESS.set(access.clone()); thread::spawn(move || serve_companion(app_data, access)); Ok(()) })
+        .invoke_handler(tauri::generate_handler![get_scan_progress, get_resolution_plan, get_companion_access, start_resolution, cancel_resolution, connect_nas_source, apply_resolution_plan, purge_quarantine])
         .run(tauri::generate_context!())
         .expect("error while running LumaSift");
 }
