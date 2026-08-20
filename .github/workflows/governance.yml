@@ -1,0 +1,20 @@
+name: Master Engineering Governance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-governance:
+    name: Verify master engineering standard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Verify required policies and release documentation
+        run: python3 scripts/verify_governance.py
