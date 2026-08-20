@@ -30,7 +30,7 @@
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "windows": {
       "wix": { "language": ["en-US"] },
-      "nsis": { "installerMode": "currentUser" }
+      "nsis": { "installMode": "currentUser" }
     }
   }
 }
