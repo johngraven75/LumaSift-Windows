@@ -26,7 +26,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - name: Configure Node
-        uses: actions/setup-node@1e60f620b9541d4d1265b53e049c92f1e0cfb1e8 # v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -52,7 +52,7 @@ jobs:
         run: |
           Get-ChildItem -Recurse src-tauri/target/release/bundle -Include *.msi,*.exe | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($_.Path)" } | Set-Content LumaSift-Windows-SHA256SUMS.txt
       - name: Publish release artifacts
-        uses: softprops/action-gh-release@72f2c25fcb47643c2ee83c9a7e0b9f4d03a2beaa # v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: windows-v0.1.0
           name: LumaSift Windows v0.1.0
