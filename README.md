@@ -1,15 +1,32 @@
-# LumaSift Windows
+# LumaSift for Windows
 
-LumaSift for Windows is the local coordinator and full desktop resolution engine. It helps an owner identify exact duplicate media and document files safely: videos, MP3 audio, DOCX documents, PDFs, and images.
+LumaSift for Windows is the **standalone coordinator** for safe duplicate resolution. It scans local folders, external drives, and connected NAS shares for user-selected videos, MP3 audio files, DOCX documents, PDFs, and images. It builds a reviewable plan before changing any files.
 
-## Safety Contract
+## Safety Model
 
-LumaSift may use a sampled hash to discover collision candidates, but it must calculate a **full SHA-256 hash** before a duplicate group is actionable. It retains the highest-ranked exact copy, proposes lower-ranked copies for **recoverable quarantine**, and requires a separate explicit purge action.
+LumaSift never treats filename similarity as duplicate proof. It first creates low-cost collision candidates from file size and sampled content, then calculates a **full SHA-256 digest** for every candidate. Only exact-content groups may enter the resolution plan.
 
-## Engineering Governance
+Each exact group retains one deterministic copy and records evidence for the decision. The lower-ranked exact copies are **queued for quarantine**, not automatically erased. On application, each file is hashed again immediately before it is moved. Permanent erase is a separate operation requiring the exact confirmation `ERASE LUMASIFT QUARANTINE`.
 
-This repository is governed by [AGENTS.md](AGENTS.md), the [Total Automation Policy](.github/AUTOMATION_POLICY.md), and the [Master Engineering Standard](.github/MASTER_ENGINEER_STANDARD.md). The automated governance workflow fails if the required engineering and release artifacts are missing.
+## NAS Sources
 
-## Current Delivery Scope
+Use a Windows UNC path such as `\\server\share`, provide a permitted Windows or NAS account, and choose whether Windows should remember the connection. The native Windows networking API receives the credentials directly in memory; LumaSift does not write the password to plans, logs, source lists, or release artifacts.
 
-The repository targets a Windows installer release once the Windows hosted packaging workflow succeeds. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for current limitations and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the platform boundary.
+## Development
+
+| Check | Command |
+| --- | --- |
+| Governance gate | `python3 scripts/verify_governance.py` |
+| Frontend lint and contract tests | `npm run test:all` |
+| Rust tests | `cd src-tauri && cargo test` |
+| Tauri package | `npm run package` |
+
+The hosted Windows release workflow performs these checks on a current Windows Rust toolchain, packages MSI and NSIS installers, writes SHA-256 checksums, and publishes a prerelease artifact set.
+
+## Architecture and Security
+
+Read [Architecture](docs/ARCHITECTURE.md), [Security](docs/SECURITY.md), [Release Notes](RELEASE_NOTES.md), and the enforced [Master Engineering Standard](.github/MASTER_ENGINEER_STANDARD.md) before contributing.
+
+## Current Distribution Scope
+
+`windows-v0.1.0` is an installer-ready **prerelease** target once the Windows CI workflow completes. The first public release remains explicitly prerelease while real Windows-hosted package evidence is collected.
