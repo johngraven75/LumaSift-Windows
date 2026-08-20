@@ -220,6 +220,7 @@ fn source_files(request: &ScanRequest, app_data: &Path) -> Result<Vec<IndexedFil
     let app_data = app_data.canonicalize().unwrap_or_else(|_| app_data.to_path_buf());
     let mut seen = HashSet::new();
     let mut files = Vec::new();
+    let mut visited_entries = 0_u64;
 
     for source in &request.sources {
         let source_path = PathBuf::from(source);
@@ -227,6 +228,11 @@ fn source_files(request: &ScanRequest, app_data: &Path) -> Result<Vec<IndexedFil
             return Err(format!("LumaSift source is not an accessible directory: {source}"));
         }
         for entry in WalkDir::new(&source_path).follow_links(false).into_iter().filter_map(Result::ok) {
+            visited_entries += 1;
+            if visited_entries % 32 == 0 {
+                update_progress("Indexing sources", visited_entries, 0, 1, Some(entry.path().to_string_lossy().into_owned()), "Walking selected sources in the background. No files will be changed.");
+            }
+            if CANCEL_REQUESTED.load(Ordering::Relaxed) { return Err("LumaSift scan cancelled while indexing sources.".to_string()); }
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -598,11 +604,37 @@ fn start_with_app_data(app_data: PathBuf, request: ScanRequest) -> Result<ScanPr
     validate_request(&request)?;
     *owner_source_scope().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = request.sources.clone();
     if state().progress.scanning { return Err("A LumaSift scan is already in progress.".to_string()); }
-    let files = source_files(&request, &app_data)?;
     CANCEL_REQUESTED.store(false, Ordering::Relaxed);
-    let initial = ScanProgress { scanning: true, phase: "Preparing".to_string(), current: 0, total: files.len() as u64, percentage: 0, current_path: None, files_considered: files.len() as u64, message: "Preparing a review-only exact-content duplicate scan. No files will be changed.".to_string(), error: None };
+    let selected_types = request.selected_types.clone();
+    let sources = request.sources.clone();
+    let initial = ScanProgress {
+        scanning: true,
+        phase: "Indexing sources".to_string(),
+        current: 0,
+        total: 0,
+        percentage: 1,
+        current_path: None,
+        files_considered: 0,
+        message: "Enumerating selected sources in the background. The workspace remains responsive.".to_string(),
+        error: None,
+    };
     { let mut runtime = state(); runtime.progress = initial.clone(); runtime.plan = None; }
-    thread::Builder::new().name("lumasift-resolution".to_string()).spawn(move || build_plan(files, request.selected_types, app_data)).map_err(|error| format!("Unable to start LumaSift worker: {error}"))?;
+    let worker = thread::Builder::new().name("lumasift-resolution".to_string()).spawn(move || {
+        let request = ScanRequest { sources, selected_types: selected_types.clone() };
+        match source_files(&request, &app_data) {
+            Ok(files) => {
+                let total = files.len() as u64;
+                update_progress("Indexing complete", 0, total, 2, None, &format!("Indexed {total} eligible files. Beginning sampled content proof."));
+                build_plan(files, selected_types, app_data);
+            }
+            Err(error) => fail_progress(error),
+        }
+    });
+    if let Err(error) = worker {
+        let message = format!("Unable to start LumaSift worker: {error}");
+        fail_progress(message.clone());
+        return Err(message);
+    }
     Ok(initial)
 }
 

@@ -21,3 +21,10 @@ test("Windows standalone engine preserves selected categories through cancellati
   assert.match(engine, /fn cancel_plan\(dispositions: Vec<Disposition>, selected_types: Vec<SelectionType>\)/);
   assert.match(engine, /selected_types,/);
 });
+
+test("Windows scan indexes in the worker and reports progress-safe failures", () => {
+  assert.match(engine, /phase: "Indexing sources"/);
+  assert.match(engine, /thread::Builder::new\(\)\.name\("lumasift-resolution"/);
+  assert.match(engine, /match source_files\(&request, &app_data\)/);
+  assert.match(engine, /Err\(error\) => fail_progress\(error\)/);
+});

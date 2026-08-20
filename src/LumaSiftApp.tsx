@@ -75,6 +75,7 @@ export function LumaSiftApp(): JSX.Element {
     try {
       const next = await invoke<ScanProgress>("get_scan_progress");
       setProgress(next);
+      if (next.error) setError(next.error);
       if (!next.scanning && next.percentage === 100) {
         const nextPlan = await invoke<ResolutionPlan | null>("get_resolution_plan");
         setPlan(nextPlan);
