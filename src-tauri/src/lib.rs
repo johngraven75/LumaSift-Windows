@@ -166,7 +166,7 @@ fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-fn update_progress(phase: &str, current: u64, total: u64, percentage: u8, path: Option<String>, message: &str) {
+fn update_progress(phase: &str, current: u64, total: u64, percentage: u8, path: Option<String>, message: &str, files_considered: u64) {
     let mut runtime = state();
     runtime.progress = ScanProgress {
         scanning: true,
@@ -175,7 +175,7 @@ fn update_progress(phase: &str, current: u64, total: u64, percentage: u8, path: 
         total,
         percentage: percentage.min(99),
         current_path: path,
-        files_considered: runtime.progress.files_considered,
+        files_considered,
         message: message.to_string(),
         error: None,
     };
@@ -227,10 +227,13 @@ fn source_files(request: &ScanRequest, app_data: &Path) -> Result<Vec<IndexedFil
         if !source_path.is_dir() {
             return Err(format!("LumaSift source is not an accessible directory: {source}"));
         }
+        // Emit an immediate progress update so the first poll reflects that the
+        // worker has started walking this source, even before the 32-entry batch fires.
+        update_progress("Indexing sources", visited_entries, 0, 1, Some(source_path.to_string_lossy().into_owned()), "Walking selected sources in the background. No files will be changed.", files.len() as u64);
         for entry in WalkDir::new(&source_path).follow_links(false).into_iter().filter_map(Result::ok) {
             visited_entries += 1;
             if visited_entries % 32 == 0 {
-                update_progress("Indexing sources", visited_entries, 0, 1, Some(entry.path().to_string_lossy().into_owned()), "Walking selected sources in the background. No files will be changed.");
+                update_progress("Indexing sources", visited_entries, 0, 1, Some(entry.path().to_string_lossy().into_owned()), "Walking selected sources in the background. No files will be changed.", files.len() as u64);
             }
             if CANCEL_REQUESTED.load(Ordering::Relaxed) { return Err("LumaSift scan cancelled while indexing sources.".to_string()); }
             if !entry.file_type().is_file() {
@@ -339,7 +342,7 @@ fn build_plan(files: Vec<IndexedFile>, selected_types: Vec<SelectionType>, app_d
             cancel_plan(dispositions, selected_types);
             return;
         }
-        update_progress("Sampling content", index as u64 + 1, total, if total == 0 { 60 } else { ((index as u64 + 1) * 60 / total) as u8 }, Some(file.path.to_string_lossy().into_owned()), "Building collision candidates without changing any files.");
+        update_progress("Sampling content", index as u64 + 1, total, if total == 0 { 60 } else { ((index as u64 + 1) * 60 / total) as u8 }, Some(file.path.to_string_lossy().into_owned()), "Building collision candidates without changing any files.", total);
         match sample_hash(&file.path, file.bytes) {
             Ok(hash) => sampled.entry((file.bytes, hash)).or_default().push(file),
             Err(error) => append_disposition(&mut dispositions, &file.path, "skipped", error),
@@ -358,7 +361,7 @@ fn build_plan(files: Vec<IndexedFile>, selected_types: Vec<SelectionType>, app_d
             }
             verified_current += 1;
             let percentage = if verification_total == 0 { 90 } else { 60 + ((verified_current * 30 / verification_total) as u8) };
-            update_progress("Verifying exact matches", verified_current, verification_total, percentage, Some(file.path.to_string_lossy().into_owned()), "Calculating full SHA-256 digests before a file may enter a resolution plan.");
+            update_progress("Verifying exact matches", verified_current, verification_total, percentage, Some(file.path.to_string_lossy().into_owned()), "Calculating full SHA-256 digests before a file may enter a resolution plan.", total);
             match full_hash(&file.path) {
                 Ok(hash) => verified.entry(hash).or_default().push(file),
                 Err(error) => append_disposition(&mut dispositions, &file.path, "skipped", error),
@@ -377,7 +380,7 @@ fn build_plan(files: Vec<IndexedFile>, selected_types: Vec<SelectionType>, app_d
             return;
         }
         let percentage = if exact_total == 0 { 99 } else { 90 + ((index as u64 + 1) * 9 / exact_total) as u8 };
-        update_progress("Ranking retained copies", index as u64 + 1, exact_total, percentage, None, "Exact content has equal source quality. Applying deterministic evidence and a stable path tie-break.");
+        update_progress("Ranking retained copies", index as u64 + 1, exact_total, percentage, None, "Exact content has equal source quality. Applying deterministic evidence and a stable path tie-break.", total);
         files.sort_by(|left, right| right.bytes.cmp(&left.bytes).then_with(|| left.path.cmp(&right.path)));
         let mut candidates = files.into_iter().map(|file| {
             let quality = evidence(&file);
@@ -624,7 +627,7 @@ fn start_with_app_data(app_data: PathBuf, request: ScanRequest) -> Result<ScanPr
         match source_files(&request, &app_data) {
             Ok(files) => {
                 let total = files.len() as u64;
-                update_progress("Indexing complete", 0, total, 2, None, &format!("Indexed {total} eligible files. Beginning sampled content proof."));
+                update_progress("Indexing complete", 0, total, 2, None, &format!("Indexed {total} eligible files. Beginning sampled content proof."), total);
                 build_plan(files, selected_types, app_data);
             }
             Err(error) => fail_progress(error),

@@ -115,12 +115,24 @@ export function LumaSiftApp(): JSX.Element {
     setError(null);
     setPlan(null);
     setBusy(true);
+    // Set scanning state immediately so the button switches to "Cancel scan",
+    // the progress orb shows "Scanning", and the polling interval starts
+    // before the invoke round-trip completes. Without this the UI appears
+    // hung because progress.scanning stays false until the await resolves.
+    setProgress({
+      ...idleProgress,
+      scanning: true,
+      phase: "Starting",
+      percentage: 1,
+      message: "Starting scan…"
+    });
     try {
       const started = await invoke<ScanProgress>("start_resolution", {
         request: { sources, selectedTypes }
       });
       setProgress(started);
     } catch (reason) {
+      setProgress(idleProgress);
       setError(String(reason));
     } finally {
       setBusy(false);
