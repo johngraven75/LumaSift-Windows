@@ -114,6 +114,15 @@ export function LumaSiftApp(): JSX.Element {
   async function startScan(): Promise<void> {
     setError(null);
     setPlan(null);
+    setProgress({
+      scanning: true,
+      phase: "Starting",
+      current: 0,
+      total: 0,
+      percentage: 1,
+      filesConsidered: 0,
+      message: "Starting scan — enumerating selected sources."
+    });
     setBusy(true);
     try {
       const started = await invoke<ScanProgress>("start_resolution", {
@@ -121,6 +130,7 @@ export function LumaSiftApp(): JSX.Element {
       });
       setProgress(started);
     } catch (reason) {
+      setProgress(idleProgress);
       setError(String(reason));
     } finally {
       setBusy(false);
