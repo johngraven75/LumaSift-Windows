@@ -229,7 +229,7 @@ fn source_files(request: &ScanRequest, app_data: &Path) -> Result<Vec<IndexedFil
         }
         for entry in WalkDir::new(&source_path).follow_links(false).into_iter().filter_map(Result::ok) {
             visited_entries += 1;
-            if visited_entries % 32 == 0 {
+            if visited_entries % 8 == 0 {
                 update_progress("Indexing sources", visited_entries, 0, 1, Some(entry.path().to_string_lossy().into_owned()), "Walking selected sources in the background. No files will be changed.");
             }
             if CANCEL_REQUESTED.load(Ordering::Relaxed) { return Err("LumaSift scan cancelled while indexing sources.".to_string()); }
@@ -237,11 +237,15 @@ fn source_files(request: &ScanRequest, app_data: &Path) -> Result<Vec<IndexedFil
                 continue;
             }
             let path = entry.path();
+            // Classify by raw path before canonicalize. On Windows, canonicalize opens
+            // every file via GetFinalPathNameByHandleW; junction points targeting an
+            // offline network can block for 30+ seconds. Skipping it for non-media
+            // entries eliminates that stall on typical drives.
+            let Some(media_kind) = classify(path, &selected) else { continue; };
             let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             if canonical.starts_with(&app_data) || !seen.insert(canonical.clone()) {
                 continue;
             }
-            let Some(media_kind) = classify(&canonical, &selected) else { continue; };
             let bytes = match canonical.metadata() {
                 Ok(metadata) => metadata.len(),
                 Err(_) => continue,

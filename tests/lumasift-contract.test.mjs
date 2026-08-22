@@ -28,3 +28,25 @@ test("Windows scan indexes in the worker and reports progress-safe failures", ()
   assert.match(engine, /match source_files\(&request, &app_data\)/);
   assert.match(engine, /Err\(error\) => fail_progress\(error\)/);
 });
+
+test("Windows scan classifies by extension before canonicalize to prevent reparse-point stalls", () => {
+  // classify() must appear before path.canonicalize() inside source_files so that
+  // the expensive OS file-open is skipped for non-media entries.  On Windows,
+  // canonicalize() opens every file via GetFinalPathNameByHandleW; a junction point
+  // targeting an offline network share can block for 30+ seconds.
+  const sourceFilesStart = engine.indexOf("fn source_files(");
+  assert.ok(sourceFilesStart !== -1, "source_files function must exist");
+  // Capture body up to the next fn declaration so no magic length is needed.
+  const nextFnIdx = engine.indexOf("\nfn ", sourceFilesStart + 1);
+  const sourceFilesBody = nextFnIdx !== -1
+    ? engine.slice(sourceFilesStart, nextFnIdx)
+    : engine.slice(sourceFilesStart);
+  const classifyIdx = sourceFilesBody.indexOf("classify(path, &selected)");
+  const canonicalizeIdx = sourceFilesBody.indexOf("path.canonicalize()");
+  assert.ok(classifyIdx !== -1, "classify(path, &selected) must appear in source_files");
+  assert.ok(canonicalizeIdx !== -1, "path.canonicalize() must appear in source_files");
+  assert.ok(
+    classifyIdx < canonicalizeIdx,
+    `classify (offset ${classifyIdx}) must precede canonicalize (offset ${canonicalizeIdx}) to avoid blocking on every non-media file`
+  );
+});
