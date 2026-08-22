@@ -238,11 +238,15 @@ fn source_files(request: &ScanRequest, app_data: &Path) -> Result<Vec<IndexedFil
                 continue;
             }
             let path = entry.path();
+            // Classify by raw path before canonicalize. On Windows, canonicalize opens
+            // every file via GetFinalPathNameByHandleW; junction points targeting an
+            // offline network can block for 30+ seconds. Skipping it for non-media
+            // entries eliminates that stall on typical drives.
+            let Some(media_kind) = classify(path, &selected) else { continue; };
             let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             if canonical.starts_with(&app_data) || !seen.insert(canonical.clone()) {
                 continue;
             }
-            let Some(media_kind) = classify(&canonical, &selected) else { continue; };
             let bytes = match canonical.metadata() {
                 Ok(metadata) => metadata.len(),
                 Err(_) => continue,
