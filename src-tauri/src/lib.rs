@@ -230,7 +230,8 @@ fn source_files(request: &ScanRequest, app_data: &Path) -> Result<Vec<IndexedFil
         for entry in WalkDir::new(&source_path).follow_links(false).into_iter().filter_map(Result::ok) {
             visited_entries += 1;
             if visited_entries % 32 == 0 {
-                update_progress("Indexing sources", visited_entries, 0, 1, Some(entry.path().to_string_lossy().into_owned()), "Walking selected sources in the background. No files will be changed.");
+                let index_pct = (1_u64 + visited_entries / 1_024).min(30) as u8;
+                update_progress("Indexing sources", visited_entries, 0, index_pct, Some(entry.path().to_string_lossy().into_owned()), "Walking selected sources in the background. No files will be changed.");
             }
             if CANCEL_REQUESTED.load(Ordering::Relaxed) { return Err("LumaSift scan cancelled while indexing sources.".to_string()); }
             if !entry.file_type().is_file() {
@@ -712,5 +713,18 @@ mod tests {
         assert_eq!(sample_hash(&first, size).expect("sample first"), sample_hash(&second, size).expect("sample second"));
         assert_eq!(full_hash(&first).expect("hash first"), full_hash(&second).expect("hash second"));
         fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn indexing_percentage_increases_with_visited_entries() {
+        // The formula used in source_files for index_pct is:
+        // (1 + visited_entries / 1_024).min(30) as u8
+        // Verify it starts at 1, grows, and caps at 30.
+        let pct = |visited: u64| -> u8 { (1_u64 + visited / 1_024).min(30) as u8 };
+        assert_eq!(pct(32), 1,    "first few batches stay at 1%");
+        assert_eq!(pct(1_024), 2, "at 1 024 entries percentage reaches 2");
+        assert_eq!(pct(10_240), 11, "at 10 240 entries percentage is 11");
+        assert_eq!(pct(29_696), 30, "at 29 696 entries percentage reaches cap of 30");
+        assert_eq!(pct(100_000), 30, "cap is never exceeded regardless of file count");
     }
 }
